@@ -341,6 +341,16 @@ class BookingStoreTest extends TestCase
             ->assertJsonValidationErrors(['title' => 'Название содержит недопустимые символы.']);
     }
 
+    /**
+     * 06:29:43 UTC — это 09:00 по историческому московскому времени (LMT +02:30:17): все прочие правила пройдены.
+     */
+    public function test_rejects_year_zero(): void
+    {
+        $this->postBooking($this->moscowRoom, '0000-06-01T06:29:43Z', '0000-06-01T07:29:43Z')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['starts_at' => 'Бронь не может начинаться раньше 0001 года.']);
+    }
+
     public function test_allows_booking_in_the_past(): void
     {
         $this->postBooking($this->moscowRoom, '2020-01-10T10:00:00+03:00', '2020-01-10T11:00:00+03:00')
