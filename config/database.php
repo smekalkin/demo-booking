@@ -97,6 +97,8 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
+            // Брони пишутся в timestamptz строкой без смещения, база читает её в поясе сессии: он обязан совпадать с app.timezone.
+            'timezone' => 'UTC',
         ],
 
         'sqlsrv' => [

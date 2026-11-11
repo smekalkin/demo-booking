@@ -75,6 +75,7 @@ class BookingStoreTest extends TestCase
             'отрицательное смещение' => ['2026-11-02T02:00:00-05:00', '2026-11-02T03:00:00-05:00'],
             'без секунд' => ['2026-11-02T10:00+03:00', '2026-11-02T11:00+03:00'],
             'с миллисекундами, как toISOString' => ['2026-11-02T07:00:00.000Z', '2026-11-02T08:00:00.000Z'],
+            'с микросекундами, как в ответе API' => ['2026-11-02T07:00:00.000000Z', '2026-11-02T08:00:00.000000Z'],
         ];
     }
 
@@ -163,6 +164,13 @@ class BookingStoreTest extends TestCase
         $this->postBooking($this->moscowRoom, '2026-11-02T10:00:00+03:00', $endsAt)->assertCreated();
     }
 
+    public function test_rejects_booking_shorter_than_15_minutes(): void
+    {
+        $this->postBooking($this->moscowRoom, '2026-11-02T10:00:00+03:00', '2026-11-02T10:10:00+03:00')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['ends_at' => 'Длительность брони — от 15 минут до 4 часов.']);
+    }
+
     public function test_rejects_booking_longer_than_4_hours(): void
     {
         $this->postBooking($this->moscowRoom, '2026-11-02T10:00:00+03:00', '2026-11-02T14:15:00+03:00')
@@ -199,7 +207,6 @@ class BookingStoreTest extends TestCase
             'начало с секундами' => ['2026-11-02T10:00:30+03:00', '2026-11-02T11:00:00+03:00', 'starts_at'],
             'начало с миллисекундами' => ['2026-11-02T07:00:00.500Z', '2026-11-02T08:00:00.000Z', 'starts_at'],
             'конец в 10:50' => ['2026-11-02T10:00:00+03:00', '2026-11-02T10:50:00+03:00', 'ends_at'],
-            '10 минут' => ['2026-11-02T10:00:00+03:00', '2026-11-02T10:10:00+03:00', 'ends_at'],
         ];
     }
 
@@ -287,6 +294,7 @@ class BookingStoreTest extends TestCase
             'пустое название' => [['title' => ''], 'title'],
             'слишком длинное название' => [['title' => str_repeat('а', 256)], 'title'],
             'время без смещения' => [['starts_at' => '2026-11-02T10:00:00'], 'starts_at'],
+            'несуществующее смещение' => [['starts_at' => '2026-11-02T10:00:00+25:00'], 'starts_at'],
             'не ISO 8601' => [['starts_at' => '02.11.2026 10:00'], 'starts_at'],
             'несуществующая дата' => [['ends_at' => '2026-02-30T11:00:00+03:00'], 'ends_at'],
             'время массивом' => [['ends_at' => ['2026-11-02T11:00:00+03:00']], 'ends_at'],
@@ -304,10 +312,41 @@ class BookingStoreTest extends TestCase
             ->assertOnlyJsonValidationErrors([$fieldName]);
     }
 
+    /**
+     * `true` без отдельной проверки превратился бы в комнату 1. Проверяем текст: «Комната не найдена» здесь был бы ложным успехом.
+     */
+    public function test_rejects_boolean_room_id(): void
+    {
+        $this->postBooking($this->moscowRoom, '2026-11-02T10:00:00+03:00', '2026-11-02T11:00:00+03:00', ['room_id' => true])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['room_id' => 'Укажите id комнаты числом.']);
+    }
+
     public function test_allows_booking_in_the_past(): void
     {
         $this->postBooking($this->moscowRoom, '2020-01-10T10:00:00+03:00', '2020-01-10T11:00:00+03:00')
             ->assertCreated();
+    }
+
+    /**
+     * Ограничение в базе вернуло бы ту же 422, поэтому смотрим, что до INSERT дело не дошло.
+     * `beforeExecuting`, а не `DB::listen`: неудачный INSERT в `listen` не попадает.
+     */
+    public function test_rejects_overlap_before_inserting(): void
+    {
+        $this->bookMoscowRoomFromTenToEleven();
+
+        $bookingInserts = 0;
+        DB::connection()->beforeExecuting(function (string $sql) use (&$bookingInserts): void {
+            if (str_starts_with($sql, 'insert into "bookings"')) {
+                $bookingInserts++;
+            }
+        });
+
+        $this->postBooking($this->moscowRoom, '2026-11-02T10:30:00+03:00', '2026-11-02T11:30:00+03:00')
+            ->assertUnprocessable();
+
+        $this->assertSame(0, $bookingInserts, 'Пересечение должна отсекать валидация, а не ограничение в базе.');
     }
 
     public function test_requires_authentication(): void
@@ -354,6 +393,15 @@ class BookingStoreTest extends TestCase
             ->create();
 
         $this->assertDatabaseCount('bookings', 2);
+    }
+
+    /**
+     * Даты уходят в базу строкой без смещения и читаются в поясе сессии, поэтому он должен быть UTC.
+     * Без настройки `timezone` в конфиге здесь был бы `Etc/UTC` из образа PostgreSQL или любой пояс сервера.
+     */
+    public function test_database_session_timezone_is_pinned_to_utc(): void
+    {
+        $this->assertSame('UTC', DB::selectOne('SHOW TIME ZONE')->TimeZone);
     }
 
     private function bookMoscowRoomFromTenToEleven(): Booking

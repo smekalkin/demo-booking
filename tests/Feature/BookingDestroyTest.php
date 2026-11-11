@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class BookingDestroyTest extends TestCase
@@ -33,11 +34,25 @@ class BookingDestroyTest extends TestCase
         $this->assertModelExists($booking);
     }
 
-    public function test_returns_not_found_for_missing_booking(): void
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function missingBookingIds(): array
+    {
+        return [
+            'нет такой' => ['999999'],
+            'не число' => ['abc'],
+            'дробное' => ['1.5'],
+            'больше bigint' => ['99999999999999999999'],
+        ];
+    }
+
+    #[DataProvider('missingBookingIds')]
+    public function test_returns_not_found_for_missing_booking(string $bookingId): void
     {
         Sanctum::actingAs(User::factory()->create());
 
-        $this->deleteJson('/api/bookings/999999')->assertNotFound();
+        $this->deleteJson("/api/bookings/{$bookingId}")->assertNotFound();
     }
 
     public function test_requires_authentication(): void

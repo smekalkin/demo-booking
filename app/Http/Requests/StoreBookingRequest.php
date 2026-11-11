@@ -24,7 +24,8 @@ class StoreBookingRequest extends FormRequest
     public const ROOM_TAKEN_MESSAGE = 'Комната уже занята в это время.';
 
     /**
-     * ISO 8601 с обязательным смещением: «Z» или «±hh:mm», с секундами или без, с миллисекундами (как у JS toISOString).
+     * ISO 8601 с обязательным смещением: «Z» или «±hh:mm», с секундами или без, с долями секунды:
+     * миллисекунды (как у JS toISOString) и микросекунды (как в ответах самого API).
      *
      * `date_format` сверяет значение с повторным форматированием, поэтому «Z» (формат `p`) и «+00:00» (формат `P`) перечислены отдельно.
      *
@@ -37,7 +38,14 @@ class StoreBookingRequest extends FormRequest
         'Y-m-d\TH:i:sp',
         'Y-m-d\TH:i:s.vP',
         'Y-m-d\TH:i:s.vp',
+        'Y-m-d\TH:i:s.uP',
+        'Y-m-d\TH:i:s.up',
     ];
+
+    /**
+     * Реальные смещения — от -12:00 до +14:00. `date_format` пропускает и «+25:00», а Carbon такое не разбирает.
+     */
+    private const UTC_OFFSET_PATTERN = '/(Z|[+-](0\d|1[0-4]):[0-5]\d)$/';
 
     private ?Room $resolvedRoom = null;
 
@@ -47,17 +55,25 @@ class StoreBookingRequest extends FormRequest
     }
 
     /**
+     * `numeric` рядом с `integer` отсекает `true`: `integer` проверяет через `filter_var`, а тот считает `true` единицей.
+     *
      * @return array<string, ValidationRule|array<mixed>|string>
      */
     public function rules(): array
     {
-        $dateFormat = 'date_format:'.implode(',', self::ISO_8601_FORMATS);
+        $dateTimeRules = [
+            'bail',
+            'required',
+            'string',
+            'date_format:'.implode(',', self::ISO_8601_FORMATS),
+            'regex:'.self::UTC_OFFSET_PATTERN,
+        ];
 
         return [
-            'room_id' => ['bail', 'required', 'integer', 'exists:rooms,id'],
+            'room_id' => ['bail', 'required', 'numeric', 'integer', 'exists:rooms,id'],
             'title' => ['required', 'string', 'max:255'],
-            'starts_at' => ['required', 'string', $dateFormat],
-            'ends_at' => ['required', 'string', $dateFormat],
+            'starts_at' => $dateTimeRules,
+            'ends_at' => $dateTimeRules,
         ];
     }
 
@@ -68,6 +84,7 @@ class StoreBookingRequest extends FormRequest
     {
         return [
             'required' => 'Поле обязательно.',
+            'room_id.numeric' => 'Укажите id комнаты числом.',
             'room_id.integer' => 'Укажите id комнаты числом.',
             'room_id.exists' => 'Комната не найдена.',
             'title.string' => 'Название должно быть строкой.',
@@ -76,6 +93,7 @@ class StoreBookingRequest extends FormRequest
             'starts_at.date_format' => 'Укажите время в формате ISO 8601 со смещением, например 2026-11-02T10:00:00+03:00.',
             'ends_at.string' => 'Укажите время в формате ISO 8601 со смещением, например 2026-11-02T11:00:00+03:00.',
             'ends_at.date_format' => 'Укажите время в формате ISO 8601 со смещением, например 2026-11-02T11:00:00+03:00.',
+            'regex' => 'Смещение часового пояса должно быть от -14:00 до +14:00.',
         ];
     }
 
@@ -123,6 +141,7 @@ class StoreBookingRequest extends FormRequest
 
     /**
      * Проверки идут от простых к дорогим: длительность и сетка не требуют базы, пересечение — требует.
+     * Длительность — раньше сетки, чтобы 10:00–10:10 получило ошибку про минимум 15 минут, а не про сетку.
      * Достаточно первой ошибки: одна бронь редко нарушает несколько правил, а клиенту нужна одна понятная причина.
      */
     private function validateSlot(Validator $validator): void
@@ -138,6 +157,14 @@ class StoreBookingRequest extends FormRequest
             return;
         }
 
+        $durationInMinutes = intdiv($endsAt->getTimestamp() - $startsAt->getTimestamp(), 60);
+
+        if ($durationInMinutes < self::MIN_DURATION_MINUTES || $durationInMinutes > self::MAX_DURATION_MINUTES) {
+            $validator->errors()->add('ends_at', 'Длительность брони — от 15 минут до 4 часов.');
+
+            return;
+        }
+
         if (! $this->isOnSlotGrid($startsAt)) {
             $validator->errors()->add('starts_at', 'Начало брони должно быть кратно '.self::SLOT_STEP_MINUTES.' минутам: 10:00, 10:15, 10:30…');
 
@@ -146,14 +173,6 @@ class StoreBookingRequest extends FormRequest
 
         if (! $this->isOnSlotGrid($endsAt)) {
             $validator->errors()->add('ends_at', 'Конец брони должен быть кратен '.self::SLOT_STEP_MINUTES.' минутам: 10:00, 10:15, 10:30…');
-
-            return;
-        }
-
-        $durationInMinutes = intdiv($endsAt->getTimestamp() - $startsAt->getTimestamp(), 60);
-
-        if ($durationInMinutes < self::MIN_DURATION_MINUTES || $durationInMinutes > self::MAX_DURATION_MINUTES) {
-            $validator->errors()->add('ends_at', 'Длительность брони — от 15 минут до 4 часов.');
 
             return;
         }
