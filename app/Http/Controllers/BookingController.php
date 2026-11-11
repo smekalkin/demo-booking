@@ -22,8 +22,6 @@ class BookingController extends Controller
      */
     private const EXCLUSION_VIOLATION = '23P01';
 
-    private const INSERT_ATTEMPTS = 3;
-
     public function index(Request $request)
     {
         return Booking::where('user_id', $request->user()->id)
@@ -34,20 +32,28 @@ class BookingController extends Controller
     /**
      * Правила брони проверяет {@see StoreBookingRequest}, ограничение в базе страхует от гонки.
      *
-     * Вставка обёрнута в транзакцию по двум причинам:
-     * - одновременные вставки пересекающихся броней могут заблокировать друг друга на проверке ограничения,
-     *   PostgreSQL прервёт одну из них с deadlock; Laravel повторит транзакцию, и повтор получит обычное нарушение ограничения;
-     * - внутри внешней транзакции (например, в тестах) это точка сохранения, и ошибка ограничения не ломает внешнюю.
+     * Вставки в одну комнату идут по очереди: транзакция сначала блокирует строку комнаты.
+     * Без блокировки одновременные вставки пересекающихся броней ждут друг друга на проверке ограничения,
+     * и PostgreSQL прерывает часть из них с deadlock (500). С блокировкой следующая вставка видит уже
+     * закоммиченную бронь и сразу получает нарушение ограничения, то есть 422.
+     *
+     * Внутри внешней транзакции (например, в тестах) это точка сохранения, и ошибка ограничения не ломает внешнюю.
      */
     public function store(StoreBookingRequest $request): Booking
     {
+        $room = $request->room();
+
         try {
-            $booking = DB::transaction(fn (): Booking => $request->user()->bookings()->create([
-                'room_id' => $request->room()->id,
-                'title' => $request->validated('title'),
-                'starts_at' => $request->startsAt(),
-                'ends_at' => $request->endsAt(),
-            ]), attempts: self::INSERT_ATTEMPTS);
+            $booking = DB::transaction(function () use ($request, $room): Booking {
+                Room::query()->whereKey($room->id)->lockForUpdate()->first();
+
+                return $request->user()->bookings()->create([
+                    'room_id' => $room->id,
+                    'title' => $request->validated('title'),
+                    'starts_at' => $request->startsAt(),
+                    'ends_at' => $request->endsAt(),
+                ]);
+            });
         } catch (QueryException $exception) {
             if ($exception->getCode() === self::EXCLUSION_VIOLATION) {
                 throw ValidationException::withMessages(['starts_at' => StoreBookingRequest::ROOM_TAKEN_MESSAGE]);

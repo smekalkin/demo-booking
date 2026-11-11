@@ -76,6 +76,7 @@ class BookingStoreTest extends TestCase
             'без секунд' => ['2026-11-02T10:00+03:00', '2026-11-02T11:00+03:00'],
             'с миллисекундами, как toISOString' => ['2026-11-02T07:00:00.000Z', '2026-11-02T08:00:00.000Z'],
             'с микросекундами, как в ответе API' => ['2026-11-02T07:00:00.000000Z', '2026-11-02T08:00:00.000000Z'],
+            'крайнее смещение +14:00' => ['2026-11-02T21:00:00+14:00', '2026-11-02T22:00:00+14:00'],
         ];
     }
 
@@ -295,6 +296,9 @@ class BookingStoreTest extends TestCase
             'слишком длинное название' => [['title' => str_repeat('а', 256)], 'title'],
             'время без смещения' => [['starts_at' => '2026-11-02T10:00:00'], 'starts_at'],
             'несуществующее смещение' => [['starts_at' => '2026-11-02T10:00:00+25:00'], 'starts_at'],
+            'смещение больше +14:00' => [['starts_at' => '2026-11-02T10:00:00+14:30'], 'starts_at'],
+            'NUL в названии' => [['title' => "План\0ёрка"], 'title'],
+            'управляющий символ в названии' => [['title' => "План\x07ёрка"], 'title'],
             'не ISO 8601' => [['starts_at' => '02.11.2026 10:00'], 'starts_at'],
             'несуществующая дата' => [['ends_at' => '2026-02-30T11:00:00+03:00'], 'ends_at'],
             'время массивом' => [['ends_at' => ['2026-11-02T11:00:00+03:00']], 'ends_at'],
@@ -322,6 +326,21 @@ class BookingStoreTest extends TestCase
             ->assertJsonValidationErrors(['room_id' => 'Укажите id комнаты числом.']);
     }
 
+    /**
+     * Битый UTF-8 приходит только в form-запросе: JSON с ним не разобрать.
+     */
+    public function test_rejects_title_with_invalid_utf8(): void
+    {
+        $this->post('/api/bookings', [
+            'room_id' => $this->moscowRoom->id,
+            'title' => "\xFF\xFE",
+            'starts_at' => '2026-11-02T10:00:00+03:00',
+            'ends_at' => '2026-11-02T11:00:00+03:00',
+        ], ['Accept' => 'application/json'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['title' => 'Название содержит недопустимые символы.']);
+    }
+
     public function test_allows_booking_in_the_past(): void
     {
         $this->postBooking($this->moscowRoom, '2020-01-10T10:00:00+03:00', '2020-01-10T11:00:00+03:00')
@@ -347,6 +366,27 @@ class BookingStoreTest extends TestCase
             ->assertUnprocessable();
 
         $this->assertSame(0, $bookingInserts, 'Пересечение должна отсекать валидация, а не ограничение в базе.');
+    }
+
+    /**
+     * Вставки в комнату сериализуются блокировкой её строки, иначе одновременные запросы ловят deadlock.
+     */
+    public function test_locks_room_before_inserting_booking(): void
+    {
+        $statements = [];
+        DB::connection()->beforeExecuting(function (string $sql) use (&$statements): void {
+            $statements[] = $sql;
+        });
+
+        $this->postBooking($this->moscowRoom, '2026-11-02T10:00:00+03:00', '2026-11-02T11:00:00+03:00')
+            ->assertCreated();
+
+        $roomLock = array_find_key($statements, fn (string $sql): bool => str_starts_with($sql, 'select * from "rooms"') && str_ends_with($sql, 'for update'));
+        $bookingInsert = array_find_key($statements, fn (string $sql): bool => str_starts_with($sql, 'insert into "bookings"'));
+
+        $this->assertNotNull($roomLock, 'Строка комнаты не блокируется.');
+        $this->assertNotNull($bookingInsert);
+        $this->assertLessThan($bookingInsert, $roomLock);
     }
 
     public function test_requires_authentication(): void
