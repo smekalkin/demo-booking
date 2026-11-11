@@ -7,7 +7,9 @@ use App\Models\Booking;
 use App\Models\Room;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
@@ -63,9 +65,11 @@ class BookingController extends Controller
         return $booking;
     }
 
-    public function destroy($id)
+    public function destroy(Booking $booking): Response
     {
-        Booking::findOrFail($id)->delete();
+        Gate::authorize('delete', $booking);
+
+        $booking->delete();
 
         return response()->noContent();
     }
